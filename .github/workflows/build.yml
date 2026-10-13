@@ -216,6 +216,8 @@ jobs:
           else
             platform=(-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_MIN")
           fi
+          mkdir -p "$RUNNER_TEMP/logs"
+          {
           cmake -S opencv-src -B opencv-build "${platform[@]}" "${zlib[@]}" \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
             -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -230,6 +232,7 @@ jobs:
           jobs="${NUMBER_OF_PROCESSORS:-$(getconf _NPROCESSORS_ONLN)}"
           cmake --build opencv-build --config Release -j "$jobs"
           cmake --install opencv-build --config Release
+          } 2>&1 | tee "$RUNNER_TEMP/logs/opencv.log"
 
       - if: runner.os != 'Windows' || runner.arch == 'ARM64'
         name: OpenCV (use static build)
@@ -526,6 +529,8 @@ jobs:
           $resolution = bazel --output_user_root=C:/_bzl cquery @flags `
             '--toolchain_resolution_debug=@bazel_tools//tools/cpp:toolchain_type' `
             '@pthreadpool//:pthreadpool' 2>&1 | ForEach-Object { "$_" -replace '\x1b\[[0-9;]*m', '' }
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/logs" | Out-Null
+          $resolution | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/logs/bazel-cquery.log"
           $selected = ($resolution -join ' ') -replace '\s+', ' ' |
             Select-String -Pattern 'type @@bazel_tools//tools/cpp:toolchain_type -> toolchain (\S+)' -AllMatches
           $toolchains = $selected.Matches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
@@ -536,7 +541,8 @@ jobs:
             exit 1
           }
 
-          bazel --output_user_root=C:/_bzl build @flags //mediapipe/tasks/c:libmediapipe
+          bazel --output_user_root=C:/_bzl build @flags //mediapipe/tasks/c:libmediapipe 2>&1 |
+            ForEach-Object { "$_" } | Tee-Object -FilePath "$env:RUNNER_TEMP/logs/bazel-build.log"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/out" | Out-Null
           Copy-Item bazel-bin/mediapipe/tasks/c/${{ matrix.lib }} "$env:GITHUB_WORKSPACE/out/"
@@ -681,6 +687,16 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: out/
+
+      # Logs need a GitHub login to read; annotations are public.
+      - if: failure()
+        name: Annotate failure
+        run: |
+          shopt -s nullglob
+          logs=("$RUNNER_TEMP"/logs/*.log)
+          if [ "${#logs[@]}" -gt 0 ]; then
+            python libmediapipe/scripts/annotate_log.py "${logs[@]}"
+          fi
 
   # Runs only when every platform built and passed its checks.
   publish:
