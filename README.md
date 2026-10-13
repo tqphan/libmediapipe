@@ -11,6 +11,7 @@ Each [release](https://github.com/tqphan/libmediapipe/releases) has one zip per 
 | Zip | Built with | Runs on | OpenCV 4.14.0 (core, imgproc) |
 |---|---|---|---|
 | `libmediapipe-<ref>-linux-x86_64.zip` | Clang 18 on Ubuntu 24.04 | glibc 2.39+ | built from source, linked in |
+| `libmediapipe-<ref>-linux-arm64.zip` | Clang 18 on Ubuntu 24.04 | glibc 2.39+ | built from source, linked in |
 | `libmediapipe-<ref>-windows-x86_64.zip` | clang-cl (LLVM) with VS 2022 | Windows 10+ | opencv.org `opencv_world` DLL, included |
 | `libmediapipe-<ref>-macos-arm64.zip` | Apple Clang | macOS 12+ | built from source, linked in |
 
@@ -30,7 +31,7 @@ Everything runs in GitHub Actions; nothing needs building locally.
 2. Push a commit whose message contains `[mediapipe release]`, or run the workflow by hand with `release` checked. Every platform is built, and the release is published only if all of them pass.
 3. In game-face, update `MEDIAPIPE_VERSION`, `MEDIAPIPE_RELEASE` and the hashes in `cmake/FetchMediaPipe.cmake`. The steps are at the top of that file.
 
-To build only some platforms while working on the workflow, put `[mediapipe: windows,macos]` in the commit message.
+To build only some platforms while working on the workflow, put `[mediapipe: windows,macos]` in the commit message. The platform keys are `linux`, `linux-arm64`, `windows` and `macos`.
 
 ## Licenses
 
