@@ -382,7 +382,7 @@ jobs:
       # passes the Arm and GCC-style flags through clang-cl the way XNNPACK
       # already does for x64 clang-cl.
       - if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        name: Patch XNNPACK (arm64 Windows)
+        name: Patch XNNPACK and MediaPipe (arm64 Windows)
         working-directory: mediapipe
         run: |
           python - <<'EOF'
@@ -433,8 +433,25 @@ jobs:
           if s.count(old) != 1:
               raise SystemExit("XNNPACK http_archive not found; update this step for the new XNNPACK version")
           w.write_text(s.replace(old, old + '\n    patches = ["@//third_party:xnnpack_windows_arm64.patch"],\n    patch_args = ["-p1"],'))
+
+          # MediaPipe's //mediapipe:windows also requires x86_64, so on arm64
+          # every Windows select falls through to Linux's branch (OpenCV from
+          # @linux_opencv at /usr, which crashes Bazel on Windows). Match the OS only.
+          b = pathlib.Path("mediapipe/BUILD")
+          s = b.read_text()
+          old = (
+              '    name = "windows",\n'
+              '    constraint_values = [\n'
+              '        "@platforms//os:windows",\n'
+              '        "@platforms//cpu:x86_64",\n'
+              '    ],\n'
+          )
+          if s.count(old) != 1:
+              raise SystemExit("//mediapipe:windows not found as expected; update this step")
+          b.write_text(s.replace(old, old.replace('        "@platforms//cpu:x86_64",\n', '')))
           EOF
           grep -n -A8 'name = "XNNPACK"' WORKSPACE
+          grep -n -A6 'name = "windows"' mediapipe/BUILD
 
       # Windows builds with clang-cl (Clang's MSVC-compatible driver, using
       # MSVC's headers, libraries and ABI), as Google's own DLL is: MediaPipe
@@ -532,16 +549,6 @@ jobs:
             $archFlags = @()
           }
           if (-not (Test-Path $env:BAZEL_SH)) { throw "BAZEL_SH not found: $env:BAZEL_SH" }
-          # Bazel crashes on a PATH entry that isn't an absolute Windows path
-          # ("expected an absolute Windows path"); drop any (the developer
-          # environment from the OpenCV build can add them).
-          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/logs" | Out-Null
-          $pathEntries = $env:PATH -split ';' | Where-Object { $_ }
-          $dropped = $pathEntries | Where-Object { $_ -notmatch '^[A-Za-z]:[\\/]' }
-          "Dropped PATH entries: $($dropped -join ' | ')" | Tee-Object -FilePath "$env:RUNNER_TEMP/logs/path.log"
-          Get-ChildItem env: | Where-Object { $_.Value -match '(^|;)[\\/][^\\/]' } |
-            ForEach-Object { "Env with a root-relative path: $($_.Name)=$($_.Value)" } |
-            Tee-Object -FilePath "$env:RUNNER_TEMP/logs/path.log" -Append
           $env:PATH = ($pathEntries | Where-Object { $_ -match '^[A-Za-z]:[\\/]' }) -join ';'
           $flags = @(
             '--compilation_mode=opt', '--jobs=auto',
