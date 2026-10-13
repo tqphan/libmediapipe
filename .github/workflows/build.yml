@@ -382,7 +382,7 @@ jobs:
       # passes the Arm and GCC-style flags through clang-cl the way XNNPACK
       # already does for x64 clang-cl.
       - if: runner.os == 'Windows' && runner.arch == 'ARM64'
-        name: Patch XNNPACK and MediaPipe (arm64 Windows)
+        name: Patch dependencies (arm64 Windows)
         working-directory: mediapipe
         run: |
           python - <<'EOF'
@@ -457,9 +457,11 @@ jobs:
               raise SystemExit("//mediapipe:windows not found as expected; update this step")
           b.write_text(s.replace(old, old.replace('        "@platforms//cpu:x86_64",\n', '')))
 
-          # rules_cc guesses clang's resource directory (lib\clang\<version>)
-          # from "clang-cl -v"; with the arm64 image's LLVM, Bazel then rejects
-          # clang's own headers as non-builtin includes. Ask clang instead.
+          # rules_cc takes clang's resource directory (lib\clang\<version>) from
+          # the last word of "clang-cl -v". The arm64 image's LLVM prints
+          # "clang version 22.1.8 (https://github.com/llvm/llvm-project <commit>)",
+          # so it guessed lib\clang\<commit>) and Bazel rejected clang's own
+          # headers as non-builtin includes. Ask clang instead.
           rules_cc_patch = "".join(line + "\n" for line in [
               "--- a/cc/private/toolchain/windows_cc_configure.bzl",
               "+++ b/cc/private/toolchain/windows_cc_configure.bzl",
@@ -477,6 +479,29 @@ jobs:
               "     if repository_ctx.path(clang_dir).exists:",
           ])
           pathlib.Path("third_party/rules_cc_clang_resource_dir.patch").write_bytes(rules_cc_patch.encode())
+
+          # gflags' Windows setting tests cpu "x64_windows", so on arm64 it
+          # leaves out windows_port.cc and -DOS_WINDOWS. Match the OS instead.
+          gflags_patch = "".join(line + "\n" for line in [
+              "--- a/BUILD",
+              "+++ b/BUILD",
+              "@@ -8,7 +8,7 @@",
+              " ",
+              " config_setting(",
+              '     name = "x64_windows",',
+              '-    values = {"cpu": "x64_windows"},',
+              '+    constraint_values = ["@platforms//os:windows"],',
+              " )",
+              " ",
+              ' load(":bazel/gflags.bzl", "gflags_sources", "gflags_library")',
+          ])
+          pathlib.Path("third_party/gflags_windows_arm64.patch").write_bytes(gflags_patch.encode())
+          w = pathlib.Path("WORKSPACE")
+          s = w.read_text()
+          old = 'strip_prefix = "gflags-2.2.2",'
+          if s.count(old) != 1:
+              raise SystemExit("gflags http_archive not found; update this step for the new gflags version")
+          w.write_text(s.replace(old, old + '\n    patches = ["@//third_party:gflags_windows_arm64.patch"],\n    patch_args = ["-p1"],'))
           m = pathlib.Path("MODULE.bazel")
           s = m.read_text()
           old = 'single_version_override(\n    module_name = "rules_cc",\n    version = "0.2.9",\n'
