@@ -456,9 +456,37 @@ jobs:
           if s.count(old) != 1:
               raise SystemExit("//mediapipe:windows not found as expected; update this step")
           b.write_text(s.replace(old, old.replace('        "@platforms//cpu:x86_64",\n', '')))
+
+          # rules_cc guesses clang's resource directory (lib\clang\<version>)
+          # from "clang-cl -v"; with the arm64 image's LLVM, Bazel then rejects
+          # clang's own headers as non-builtin includes. Ask clang instead.
+          rules_cc_patch = "".join(line + "\n" for line in [
+              "--- a/cc/private/toolchain/windows_cc_configure.bzl",
+              "+++ b/cc/private/toolchain/windows_cc_configure.bzl",
+              "@@ -623,6 +623,11 @@",
+              " def _get_clang_dir(repository_ctx, llvm_path, clang_version):",
+              '     """Get the clang installation directory."""',
+              " ",
+              "+    # Ask clang for its resource directory rather than guess it from the version.",
+              '+    result = repository_ctx.execute([llvm_path + "/bin/clang-cl.exe", "/clang:-print-resource-dir"])',
+              "+    if result.return_code == 0 and result.stdout.strip():",
+              "+        return result.stdout.strip()",
+              "+",
+              '     # The clang_version string format is "X.X.X"',
+              r'     clang_dir = llvm_path + "\\lib\\clang\\" + clang_version',
+              "     if repository_ctx.path(clang_dir).exists:",
+          ])
+          pathlib.Path("third_party/rules_cc_clang_resource_dir.patch").write_bytes(rules_cc_patch.encode())
+          m = pathlib.Path("MODULE.bazel")
+          s = m.read_text()
+          old = 'single_version_override(\n    module_name = "rules_cc",\n    version = "0.2.9",\n'
+          if s.count(old) != 1:
+              raise SystemExit("rules_cc single_version_override not found; update this step")
+          m.write_text(s.replace(old, old + '    patches = ["//third_party:rules_cc_clang_resource_dir.patch"],\n    patch_strip = 1,\n'))
           EOF
           grep -n -A8 'name = "XNNPACK"' WORKSPACE
           grep -n -A6 'name = "windows"' mediapipe/BUILD
+          grep -n -A5 'module_name = "rules_cc"' MODULE.bazel
 
       # Windows builds with clang-cl (Clang's MSVC-compatible driver, using
       # MSVC's headers, libraries and ABI), as Google's own DLL is: MediaPipe
@@ -470,7 +498,9 @@ jobs:
         working-directory: mediapipe
         run: |
           llvm="C:/Program Files/LLVM"
-          "$llvm/bin/clang-cl.exe" --version
+          mkdir -p "$RUNNER_TEMP/logs"
+          { "$llvm/bin/clang-cl.exe" -v 2>&1 | head -3
+            echo "resource dir: $("$llvm/bin/clang-cl.exe" /clang:-print-resource-dir)"; } | tee "$RUNNER_TEMP/logs/clang.log"
           echo "BAZEL_LLVM=$llvm" >> "$GITHUB_ENV"
           mkdir -p clang_cl
           # rules_cc's constraint, which its clang-cl toolchains require;
@@ -586,7 +616,16 @@ jobs:
 
           bazel --output_user_root=C:/_bzl build @flags //mediapipe/tasks/c:libmediapipe 2>&1 |
             ForEach-Object { "$_" } | Tee-Object -FilePath "$env:RUNNER_TEMP/logs/bazel-build.log"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) {
+            $code = $LASTEXITCODE
+            # The include directories the selected toolchain treats as builtin.
+            $outputBase = bazel --output_user_root=C:/_bzl info output_base
+            Get-ChildItem "$outputBase/external" -Directory -Filter '*local_config_cc*' |
+              ForEach-Object { Select-String -Path "$($_.FullName)/BUILD" -Pattern 'lib.+clang' -ErrorAction SilentlyContinue } |
+              Select-Object -First 20 | ForEach-Object { "$_" } |
+              Set-Content -Encoding utf8 "$env:RUNNER_TEMP/logs/toolchain-includes.log"
+            exit $code
+          }
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/out" | Out-Null
           Copy-Item bazel-bin/mediapipe/tasks/c/${{ matrix.lib }} "$env:GITHUB_WORKSPACE/out/"
           # On arm64 OpenCV is linked in.
