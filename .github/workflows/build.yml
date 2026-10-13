@@ -849,7 +849,7 @@ jobs:
           (cd dist && sha256sum *.zip | tee SHA256SUMS)
           source="$(cat artifacts/libmediapipe-linux-x86_64/SOURCE.txt)"
           cat > notes.md <<EOF
-          libmediapipe (the MediaPipe Tasks C API library) built from the open-source MediaPipe tree, without the Clearcut usage logger that PyPI's mediapipe wheels ship from 0.10.35 on. Each library passed \`scripts/check_mediapipe_lib.py\` (no telemetry strings, all C API functions game-face uses) and a check for network imports.
+          libmediapipe (the MediaPipe Tasks C API library) built from the open-source MediaPipe tree, without the Clearcut usage logger that PyPI's mediapipe wheels ship from 0.10.35 on. Each library passed \`scripts/check_mediapipe_lib.py\` (no telemetry strings, all C API functions game-face uses) and a check for network imports; each Windows DLL was also checked for its architecture (x64 or ARM64).
 
           $source. Workflow: [run $GITHUB_RUN_ID]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID) at libmediapipe commit $GITHUB_SHA.
 
