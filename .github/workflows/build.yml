@@ -549,7 +549,6 @@ jobs:
             $archFlags = @()
           }
           if (-not (Test-Path $env:BAZEL_SH)) { throw "BAZEL_SH not found: $env:BAZEL_SH" }
-          $env:PATH = ($pathEntries | Where-Object { $_ -match '^[A-Za-z]:[\\/]' }) -join ';'
           $flags = @(
             '--compilation_mode=opt', '--jobs=auto',
             '--copt=-DNDEBUG', '--copt=-DLITERT_DISABLE_NPU',
