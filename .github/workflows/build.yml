@@ -19,8 +19,10 @@ name: Build
 #                 libmediapipe needs only the OS and C++ runtime. Linux (x86_64
 #                 and arm64) needs glibc 2.39 or newer (Ubuntu 24.04); macOS 12
 #                 or newer.
-#   Windows       opencv.org's prebuilt opencv_world DLL, checked against the
+#   Windows x64   opencv.org's prebuilt opencv_world DLL, checked against the
 #                 digest GitHub publishes, shipped next to libmediapipe.dll.
+#   Windows arm64 opencv.org has no arm64 build, so built from source (MSVC)
+#                 and linked statically, as on Linux and macOS.
 #
 # Publishing: a pushed commit whose message contains "[mediapipe release]" (or
 # a manual run with "release" set) builds every platform and publishes a
@@ -40,8 +42,8 @@ on:
         description: MediaPipe tag or commit (no public tag exists for 1.0.1)
         default: v1.0.0
       platforms:
-        description: Platforms to build (comma-separated linux, linux-arm64, windows, macos)
-        default: linux,linux-arm64,windows,macos
+        description: Platforms to build (comma-separated linux, linux-arm64, windows, windows-arm64, macos)
+        default: linux,linux-arm64,windows,windows-arm64,macos
       release:
         description: Publish a GitHub Release (builds every platform)
         type: boolean
@@ -86,6 +88,8 @@ jobs:
               # VS 2022's headers and libraries (clang-cl compiles); windows-latest has VS 2026.
               {"key": "windows", "name": "Windows x86_64", "os": "windows-2022",
                "lib": "libmediapipe.dll", "artifact": "libmediapipe-windows-x86_64"},
+              {"key": "windows-arm64", "name": "Windows arm64", "os": "windows-11-arm",
+               "lib": "libmediapipe.dll", "artifact": "libmediapipe-windows-arm64"},
               {"key": "macos", "name": "macOS arm64", "os": "macos-15",
                "lib": "libmediapipe.dylib", "artifact": "libmediapipe-macos-arm64"},
           ]
@@ -172,7 +176,9 @@ jobs:
         name: Compiler (Clang 18)
         run: sudo apt-get update && sudo apt-get install -y clang-18 g++-14 libstdc++-14-dev
 
-      - if: runner.os != 'Windows'
+      # opencv.org publishes no Windows arm64 build, so Windows arm64 builds
+      # OpenCV from source and links it in, like Linux and macOS.
+      - if: runner.os != 'Windows' || runner.arch == 'ARM64'
         id: opencv-cache
         uses: actions/cache@v4
         with:
@@ -184,7 +190,10 @@ jobs:
       # on macOS), OpenCL, the IPP/KleidiCV/Carotene accelerators, and the image
       # codec, flatbuffers and protobuf third-party libraries (for modules not
       # built here). zlib comes from the system headers; MediaPipe links its own.
-      - if: runner.os != 'Windows' && steps.opencv-cache.outputs.cache-hit != 'true'
+      # Windows has no system zlib, so OpenCV builds its bundled one there just
+      # to compile against; only core and imgproc are linked, and their zlib
+      # calls resolve to MediaPipe's zlib, as on Linux.
+      - if: (runner.os != 'Windows' || runner.arch == 'ARM64') && steps.opencv-cache.outputs.cache-hit != 'true'
         name: Build OpenCV (source, static)
         run: |
           set -euo pipefail
@@ -194,52 +203,83 @@ jobs:
             echo "::error::OpenCV tag $OPENCV_VERSION is at $actual, expected $OPENCV_COMMIT"
             exit 1
           fi
+          prefix="$PWD/opencv-install"
+          zlib=(-DBUILD_ZLIB=OFF)
           if [ "$RUNNER_OS" = Linux ]; then
             platform=(-DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18)
+          elif [ "$RUNNER_OS" = Windows ]; then
+            # MSVC's own arm64 compiler; /MD and no /GL, so lld-link can link it
+            # into the clang-cl build.
+            platform=(-G "Visual Studio 17 2022" -A ARM64 -DBUILD_WITH_STATIC_CRT=OFF)
+            zlib=(-DBUILD_ZLIB=ON -DWITH_ZLIB_NG=OFF)
+            prefix="$(cygpath -m "$prefix")"
           else
             platform=(-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_MIN")
           fi
-          cmake -S opencv-src -B opencv-build "${platform[@]}" \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/opencv-install" \
+          cmake -S opencv-src -B opencv-build "${platform[@]}" "${zlib[@]}" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
             -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
             -DBUILD_SHARED_LIBS=OFF -DBUILD_LIST=core,imgproc \
             -DWITH_LAPACK=OFF -DWITH_OPENCL=OFF -DWITH_EIGEN=OFF -DWITH_OPENMP=OFF -DWITH_TBB=OFF \
             -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_KLEIDICV=OFF -DWITH_CAROTENE=OFF \
             -DWITH_JPEG=OFF -DWITH_PNG=OFF -DWITH_TIFF=OFF -DWITH_WEBP=OFF -DWITH_OPENJPEG=OFF \
             -DWITH_JASPER=OFF -DWITH_OPENEXR=OFF -DWITH_AVIF=OFF -DWITH_SPNG=OFF \
-            -DWITH_FLATBUFFERS=OFF -DWITH_PROTOBUF=OFF -DBUILD_ZLIB=OFF \
+            -DWITH_FLATBUFFERS=OFF -DWITH_PROTOBUF=OFF \
             -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF \
             -DBUILD_JAVA=OFF -DBUILD_opencv_python3=OFF -DOPENCV_GENERATE_PKGCONFIG=OFF
-          cmake --build opencv-build -j "$(getconf _NPROCESSORS_ONLN)"
-          cmake --install opencv-build
+          jobs="${NUMBER_OF_PROCESSORS:-$(getconf _NPROCESSORS_ONLN)}"
+          cmake --build opencv-build --config Release -j "$jobs"
+          cmake --install opencv-build --config Release
 
-      - if: runner.os != 'Windows'
+      - if: runner.os != 'Windows' || runner.arch == 'ARM64'
         name: OpenCV (use static build)
         run: |
           set -euo pipefail
-          # Only these two are linked; anything else OpenCV installed is listed
-          # but unused (the libmediapipe dependency check below is what counts).
-          find opencv-install/lib -name '*.a' | sort
-          for a in libopencv_core.a libopencv_imgproc.a; do
-            [ -f "opencv-install/lib/$a" ] || { echo "::error::opencv-install/lib/$a is missing"; exit 1; }
-          done
-          # imgproc before core: GNU ld resolves static libraries in order.
-          build='cc_library(
-              name = "opencv",
-              srcs = ["lib/libopencv_imgproc.a", "lib/libopencv_core.a"],
-              hdrs = glob(["include/opencv4/opencv2/**/*.h*"]),
-              includes = ["include/opencv4/"],
+          # Only core and imgproc are linked; anything else OpenCV installed is
+          # listed but unused (the libmediapipe dependency check below is what counts).
+          if [ "$RUNNER_OS" = Windows ]; then
+            # OpenCV's Windows layout: <arch>/<vc>/staticlib/opencv_core<version>.lib.
+            find opencv-install -name '*.lib' | sort
+            libs=()
+            for m in imgproc core; do
+              mapfile -t found < <(find opencv-install -path '*/staticlib/*' -name "opencv_${m}[0-9]*.lib")
+              if [ "${#found[@]}" -ne 1 ]; then
+                echo "::error::expected one opencv_${m} static library, found: ${found[*]}"
+                exit 1
+              fi
+              libs+=("\"${found[0]#opencv-install/}\"")
+            done
+            srcs="$(IFS=,; echo "${libs[*]}")"
+            headers=include
+          else
+            find opencv-install/lib -name '*.a' | sort
+            for a in libopencv_core.a libopencv_imgproc.a; do
+              [ -f "opencv-install/lib/$a" ] || { echo "::error::opencv-install/lib/$a is missing"; exit 1; }
+            done
+            # imgproc before core: GNU ld resolves static libraries in order.
+            srcs='"lib/libopencv_imgproc.a", "lib/libopencv_core.a"'
+            headers=include/opencv4
+          fi
+          build="cc_library(
+              name = \"opencv\",
+              srcs = [$srcs],
+              hdrs = glob([\"$headers/opencv2/**/*.h*\"]),
+              includes = [\"$headers/\"],
               linkstatic = 1,
-              visibility = ["//visibility:public"],
-          )'
+              visibility = [\"//visibility:public\"],
+          )"
+          prefix="$PWD/opencv-install"
           if [ "$RUNNER_OS" = Linux ]; then
             repo=linux_opencv; file=opencv_linux.BUILD
+          elif [ "$RUNNER_OS" = Windows ]; then
+            repo=windows_opencv; file=opencv_windows.BUILD
+            prefix="$(cygpath -m "$prefix")"
           else
             repo=macos_opencv; file=opencv_macos.BUILD
           fi
-          printf '%s\n' "$build" > "mediapipe/third_party/$file"
-          # Point the @linux_opencv / @macos_opencv local repository at the build.
-          python - "$repo" "$PWD/opencv-install" <<'EOF'
+          printf '%s\n' "$build" | tee "mediapipe/third_party/$file"
+          # Point the @linux_opencv / @macos_opencv / @windows_opencv local repository at the build.
+          python - "$repo" "$prefix" <<'EOF'
           import pathlib, re, sys
           repo, path = sys.argv[1], sys.argv[2]
           p = pathlib.Path("mediapipe/WORKSPACE")
@@ -251,7 +291,7 @@ jobs:
           EOF
           grep -n -A4 "name = \"$repo\"" mediapipe/WORKSPACE
 
-      - if: runner.os == 'Windows'
+      - if: runner.os == 'Windows' && runner.arch == 'X64'
         name: OpenCV (opencv.org)
         run: |
           (
@@ -313,6 +353,67 @@ jobs:
           EOF
           grep -n -A6 'module_name = "protobuf"' MODULE.bazel
 
+      # XNNPACK's "aarch64" group leaves out Windows, so on arm64 Windows it
+      # would build none of its Arm kernels while its C code still calls them.
+      # Its windows_aarch64 setting also tests cpu "aarch64_windows", but
+      # Bazel's arm64 Windows cpu is "arm64_windows". The patch fixes both and
+      # passes the Arm and GCC-style flags through clang-cl the way XNNPACK
+      # already does for x64 clang-cl.
+      - if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        name: Patch XNNPACK (arm64 Windows)
+        working-directory: mediapipe
+        run: |
+          python - <<'EOF'
+          import pathlib
+          patch = (
+              "--- a/build_config/BUILD.bazel\n"
+              "+++ b/build_config/BUILD.bazel\n"
+              "@@ -144,7 +144,7 @@\n"
+              " config_setting(\n"
+              '     name = "windows_aarch64",\n'
+              "     values = {\n"
+              '-         "cpu": "aarch64_windows",\n'
+              '+         "cpu": "arm64_windows",\n'
+              "     },\n"
+              " )\n"
+              " \n"
+              "@@ -340,6 +340,7 @@\n"
+              '         ":macos_arm64",\n'
+              '         ":tvos_arm64",\n'
+              '         ":watchos_arm64_32",\n'
+              '+        ":windows_aarch64",\n'
+              "     ],\n"
+              " )\n"
+              " \n"
+              "--- a/build_defs.bzl\n"
+              "+++ b/build_defs.bzl\n"
+              "@@ -351,6 +351,7 @@\n"
+              '             "//build_config:macos_x86_64_legacy": gcc_x86_copts,\n'
+              '             "//build_config:macos_arm64": aarch64_copts,\n'
+              '             "//build_config:windows_x86_64_clangcl": ["/clang:" + opt for opt in gcc_x86_copts],\n'
+              '+            "//build_config:windows_aarch64": ["/clang:" + opt for opt in aarch64_copts],\n'
+              '             "//build_config:windows_x86_64_clang": gcc_x86_copts,\n'
+              '             "//build_config:windows_x86_64_mingw": mingw_copts + gcc_x86_copts,\n'
+              '             "//build_config:windows_x86_64_msys": msys_copts + gcc_x86_copts,\n'
+              "@@ -373,6 +374,7 @@\n"
+              '             "//conditions:default": [],\n'
+              "         }) + select({\n"
+              '             "//build_config:windows_x86_64_clangcl": ["/clang:" + opt for opt in gcc_copts],\n'
+              '+            "//build_config:windows_aarch64": ["/clang:" + opt for opt in gcc_copts],\n'
+              '             "//build_config:windows_x86_64_clang": gcc_copts,\n'
+              '             "//build_config:windows_x86_64_mingw": gcc_copts,\n'
+              '             "//build_config:windows_x86_64_msys": gcc_copts,\n'
+          )
+          pathlib.Path("third_party/xnnpack_windows_arm64.patch").write_bytes(patch.encode())
+          w = pathlib.Path("WORKSPACE")
+          s = w.read_text()
+          old = 'strip_prefix = "XNNPACK-68167d1fefa50296f0588ec280f48c58357ca898",'
+          if s.count(old) != 1:
+              raise SystemExit("XNNPACK http_archive not found; update this step for the new XNNPACK version")
+          w.write_text(s.replace(old, old + '\n    patches = ["@//third_party:xnnpack_windows_arm64.patch"],\n    patch_args = ["-p1"],'))
+          EOF
+          grep -n -A8 'name = "XNNPACK"' WORKSPACE
+
       # Windows builds with clang-cl (Clang's MSVC-compatible driver, using
       # MSVC's headers, libraries and ABI), as Google's own DLL is: MediaPipe
       # and protobuf have code that Clang accepts and the MSVC compiler doesn't.
@@ -326,14 +427,23 @@ jobs:
           "$llvm/bin/clang-cl.exe" --version
           echo "BAZEL_LLVM=$llvm" >> "$GITHUB_ENV"
           mkdir -p clang_cl
+          # rules_cc's constraint, which its clang-cl toolchains require;
+          # @bazel_tools//tools/cpp:clang-cl is a different one.
           cat > clang_cl/BUILD.bazel <<'EOF'
           platform(
               name = "x64_windows-clang-cl",
               constraint_values = [
                   "@platforms//cpu:x86_64",
                   "@platforms//os:windows",
-                  # rules_cc's constraint, which its clang-cl toolchain requires;
-                  # @bazel_tools//tools/cpp:clang-cl is a different one.
+                  "@rules_cc//cc/private/toolchain:clang-cl",
+              ],
+          )
+
+          platform(
+              name = "arm64_windows-clang-cl",
+              constraint_values = [
+                  "@platforms//cpu:arm64",
+                  "@platforms//os:windows",
                   "@rules_cc//cc/private/toolchain:clang-cl",
               ],
           )
@@ -372,27 +482,44 @@ jobs:
       # cc_configure repository, by its canonical name) and, via --host_platform,
       # for the tools Bazel builds too; otherwise those fall back to cl.exe.
       # Same set as TensorFlow's win_clang config.
+      # The arm64 runner has no MSYS2, so Git's bash runs the genrules there.
+      # rules_cc gives clang-cl no target triple, so arm64 passes one rather
+      # than depend on how the runner's LLVM was built. XNNPACK's hand-written
+      # assembly (GNU syntax), SME and KleidiAI kernels stay off on arm64
+      # Windows; its NEON, dot-product and fp16 C kernels are built.
       - if: runner.os == 'Windows'
         name: Build
         working-directory: mediapipe
         shell: pwsh
-        env:
-          BAZEL_SH: C:\msys64\usr\bin\bash.exe
         run: |
           $py = (Get-Command python).Source -replace '\\', '/'
           $swiftStub = "$env:RUNNER_TEMP/swift_local_config" -replace '\\', '/'
           New-Item -ItemType Directory -Force $swiftStub | Out-Null
           New-Item -ItemType File -Force "$swiftStub/BUILD.bazel", "$swiftStub/WORKSPACE" | Out-Null
+          if ($env:RUNNER_ARCH -eq 'ARM64') {
+            $arch = 'arm64'
+            $env:BAZEL_SH = 'C:\Program Files\Git\usr\bin\bash.exe'
+            $archFlags = @(
+              '--copt=--target=aarch64-pc-windows-msvc', '--host_copt=--target=aarch64-pc-windows-msvc',
+              '--define=xnn_enable_assembly=false', '--define=xnn_enable_kleidiai=false',
+              '--define=xnn_enable_arm_sme=false', '--define=xnn_enable_arm_sme2=false'
+            )
+          } else {
+            $arch = 'x64'
+            $env:BAZEL_SH = 'C:\msys64\usr\bin\bash.exe'
+            $archFlags = @()
+          }
+          if (-not (Test-Path $env:BAZEL_SH)) { throw "BAZEL_SH not found: $env:BAZEL_SH" }
           $flags = @(
             '--compilation_mode=opt', '--jobs=auto',
             '--copt=-DNDEBUG', '--copt=-DLITERT_DISABLE_NPU',
-            '--extra_toolchains=@@rules_cc~~cc_configure_extension~local_config_cc//:cc-toolchain-x64_windows-clang-cl',
-            '--extra_execution_platforms=//clang_cl:x64_windows-clang-cl',
-            '--host_platform=//clang_cl:x64_windows-clang-cl', '--compiler=clang-cl',
+            "--extra_toolchains=@@rules_cc~~cc_configure_extension~local_config_cc//:cc-toolchain-${arch}_windows-clang-cl",
+            "--extra_execution_platforms=//clang_cl:${arch}_windows-clang-cl",
+            "--host_platform=//clang_cl:${arch}_windows-clang-cl", '--compiler=clang-cl',
             '--define=MEDIAPIPE_DISABLE_GPU=1',
             "--override_repository=rules_swift~~non_module_deps~build_bazel_rules_swift_local_config=$swiftStub",
             "--action_env=PYTHON_BIN_PATH=$py"
-          )
+          ) + $archFlags
 
           # Fail fast unless Bazel resolves the clang-cl toolchain (it silently
           # falls back to MSVC's when the platform doesn't match).
@@ -403,7 +530,7 @@ jobs:
             Select-String -Pattern 'type @@bazel_tools//tools/cpp:toolchain_type -> toolchain (\S+)' -AllMatches
           $toolchains = $selected.Matches | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
           "C++ toolchain: $toolchains"
-          if (-not $toolchains -or ($toolchains | Where-Object { $_ -notmatch 'clang-cl' })) {
+          if (-not $toolchains -or ($toolchains | Where-Object { $_ -notmatch "${arch}_windows-clang-cl" })) {
             $resolution | Select-String 'ToolchainResolution' | Select-Object -First 60
             Write-Output '::error::Bazel did not select the clang-cl toolchain.'
             exit 1
@@ -413,6 +540,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force "$env:GITHUB_WORKSPACE/out" | Out-Null
           Copy-Item bazel-bin/mediapipe/tasks/c/${{ matrix.lib }} "$env:GITHUB_WORKSPACE/out/"
+          # On arm64 OpenCV is linked in.
+          if ($arch -eq 'arm64') { exit 0 }
           # libmediapipe.dll imports opencv_world<version>.dll (not the debug "d" build).
           $opencvDll = Get-ChildItem C:/opencv/build/x64/vc*/bin/opencv_world*.dll | Where-Object { $_.Name -notmatch 'd\.dll$' }
           if (@($opencvDll).Count -ne 1) { throw "Expected one release opencv_world DLL, found: $opencvDll" }
@@ -468,13 +597,31 @@ jobs:
 
       - if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
 
       - if: runner.os == 'Windows'
         name: Check imports
         shell: pwsh
         run: |
           $lib = "out/${{ matrix.lib }}"
+          $machine = if ($env:RUNNER_ARCH -eq 'ARM64') { 'ARM64' } else { 'x64' }
+          $header = dumpbin /nologo /headers $lib | Select-String -Pattern 'machine \((\S+)\)' | Select-Object -First 1
+          "Machine: $header"
+          if (-not $header -or $header.Matches[0].Groups[1].Value -ne $machine) {
+            Write-Output "::error::$lib is not a $machine DLL"
+            exit 1
+          }
           dumpbin /nologo /dependents $lib
+          if ($machine -eq 'ARM64') {
+            # OpenCV is linked in, so no OpenCV DLL may be imported.
+            $opencv = dumpbin /nologo /dependents $lib | Select-String -Pattern '^\s+opencv' -CaseSensitive:$false
+            if ($opencv) {
+              Write-Output "::error::$lib imports an OpenCV DLL:"
+              $opencv
+              exit 1
+            }
+          }
           $net = dumpbin /nologo /dependents $lib | Select-String -Pattern '^\s+(wininet|winhttp|ws2_32|wsock32|urlmon)\.dll' -CaseSensitive:$false
           if ($net) {
             Write-Output "::error::$lib imports network libraries:"
@@ -513,7 +660,7 @@ jobs:
           echo "No network imports."
 
       # Both are Apache-2.0, which asks for the license to travel with binaries
-      # (OpenCV is linked into libmediapipe on Linux and macOS).
+      # (OpenCV is linked into libmediapipe on Linux, macOS and Windows arm64).
       - name: Licenses
         run: |
           set -euo pipefail
@@ -582,9 +729,10 @@ jobs:
           | linux-x86_64 | Clang 18 (Ubuntu 24.04) | glibc 2.39+ | built from source, linked in |
           | linux-arm64 | Clang 18 (Ubuntu 24.04) | glibc 2.39+ | built from source, linked in |
           | windows-x86_64 | clang-cl (LLVM) with VS 2022 | Windows 10+ | opencv.org opencv_world DLL, included |
+          | windows-arm64 | clang-cl (LLVM) with VS 2022 | Windows 11 on Arm | built from source, linked in |
           | macos-arm64 | Apple Clang | macOS $MACOS_MIN+ | built from source, linked in |
 
-          On Linux and macOS libmediapipe needs nothing beyond the OS and C++ runtime. On Windows it needs the included opencv_world DLL next to it and the Microsoft Visual C++ runtime. MediaPipe and OpenCV are Apache-2.0; their licenses are in each zip. SHA256SUMS lists the zips; each zip has its own SHA256SUMS for its files.
+          On Linux and macOS libmediapipe needs nothing beyond the OS and C++ runtime. On Windows x64 it needs the included opencv_world DLL next to it and the Microsoft Visual C++ runtime; on Windows arm64 OpenCV is linked in, so it needs only the Microsoft Visual C++ runtime. MediaPipe and OpenCV are Apache-2.0; their licenses are in each zip. SHA256SUMS lists the zips; each zip has its own SHA256SUMS for its files.
           EOF
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
