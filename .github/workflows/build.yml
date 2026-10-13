@@ -193,6 +193,13 @@ jobs:
       # Windows has no system zlib, so OpenCV builds its bundled one there just
       # to compile against; only core and imgproc are linked, and their zlib
       # calls resolve to MediaPipe's zlib, as on Linux.
+      # CMake's Visual Studio generator finds no instance on the arm64 image, so
+      # OpenCV builds with Ninja and cl.exe from the developer environment.
+      - if: runner.os == 'Windows' && runner.arch == 'ARM64' && steps.opencv-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
       - if: (runner.os != 'Windows' || runner.arch == 'ARM64') && steps.opencv-cache.outputs.cache-hit != 'true'
         name: Build OpenCV (source, static)
         run: |
@@ -210,7 +217,11 @@ jobs:
           elif [ "$RUNNER_OS" = Windows ]; then
             # MSVC's own arm64 compiler; /MD and no /GL, so lld-link can link it
             # into the clang-cl build.
-            platform=(-G "Visual Studio 17 2022" -A ARM64 -DBUILD_WITH_STATIC_CRT=OFF)
+            mkdir -p "$RUNNER_TEMP/logs"
+            { "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -all -prerelease -products '*' \
+                | grep -E '^(displayName|installationPath|installationVersion):' || true
+              command -v cl ninja link; } 2>&1 | tee "$RUNNER_TEMP/logs/vswhere.log"
+            platform=(-G Ninja -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl -DBUILD_WITH_STATIC_CRT=OFF)
             zlib=(-DBUILD_ZLIB=ON -DWITH_ZLIB_NG=OFF)
             prefix="$(cygpath -m "$prefix")"
           else
