@@ -178,9 +178,11 @@ jobs:
 
       # opencv.org publishes no Windows arm64 build, so Windows arm64 builds
       # OpenCV from source and links it in, like Linux and macOS.
+      # Restored here and saved right after the build (not at the end of the
+      # job), so a later failure doesn't discard it.
       - if: runner.os != 'Windows' || runner.arch == 'ARM64'
         id: opencv-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: opencv-install
           # Bump the trailing number when the OpenCV build options change.
@@ -244,6 +246,12 @@ jobs:
           cmake --build opencv-build --config Release -j "$jobs"
           cmake --install opencv-build --config Release
           } 2>&1 | tee "$RUNNER_TEMP/logs/opencv.log"
+
+      - if: (runner.os != 'Windows' || runner.arch == 'ARM64') && steps.opencv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: opencv-install
+          key: ${{ steps.opencv-cache.outputs.cache-primary-key }}
 
       - if: runner.os != 'Windows' || runner.arch == 'ARM64'
         name: OpenCV (use static build)
@@ -524,6 +532,17 @@ jobs:
             $archFlags = @()
           }
           if (-not (Test-Path $env:BAZEL_SH)) { throw "BAZEL_SH not found: $env:BAZEL_SH" }
+          # Bazel crashes on a PATH entry that isn't an absolute Windows path
+          # ("expected an absolute Windows path"); drop any (the developer
+          # environment from the OpenCV build can add them).
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/logs" | Out-Null
+          $pathEntries = $env:PATH -split ';' | Where-Object { $_ }
+          $dropped = $pathEntries | Where-Object { $_ -notmatch '^[A-Za-z]:[\\/]' }
+          "Dropped PATH entries: $($dropped -join ' | ')" | Tee-Object -FilePath "$env:RUNNER_TEMP/logs/path.log"
+          Get-ChildItem env: | Where-Object { $_.Value -match '(^|;)[\\/][^\\/]' } |
+            ForEach-Object { "Env with a root-relative path: $($_.Name)=$($_.Value)" } |
+            Tee-Object -FilePath "$env:RUNNER_TEMP/logs/path.log" -Append
+          $env:PATH = ($pathEntries | Where-Object { $_ -match '^[A-Za-z]:[\\/]' }) -join ';'
           $flags = @(
             '--compilation_mode=opt', '--jobs=auto',
             '--copt=-DNDEBUG', '--copt=-DLITERT_DISABLE_NPU',
