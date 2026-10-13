@@ -387,7 +387,8 @@ jobs:
         run: |
           python - <<'EOF'
           import pathlib
-          patch = (
+          # One file per patch: Bazel's patcher put a two-file patch's hunks on the wrong file.
+          config_patch = (
               "--- a/build_config/BUILD.bazel\n"
               "+++ b/build_config/BUILD.bazel\n"
               "@@ -144,7 +144,7 @@\n"
@@ -407,6 +408,8 @@ jobs:
               "     ],\n"
               " )\n"
               " \n"
+          )
+          defs_patch = (
               "--- a/build_defs.bzl\n"
               "+++ b/build_defs.bzl\n"
               "@@ -351,6 +351,7 @@\n"
@@ -426,13 +429,17 @@ jobs:
               '             "//build_config:windows_x86_64_mingw": gcc_copts,\n'
               '             "//build_config:windows_x86_64_msys": gcc_copts,\n'
           )
-          pathlib.Path("third_party/xnnpack_windows_arm64.patch").write_bytes(patch.encode())
+          pathlib.Path("third_party/xnnpack_windows_arm64_config.patch").write_bytes(config_patch.encode())
+          pathlib.Path("third_party/xnnpack_windows_arm64_defs.patch").write_bytes(defs_patch.encode())
           w = pathlib.Path("WORKSPACE")
           s = w.read_text()
           old = 'strip_prefix = "XNNPACK-68167d1fefa50296f0588ec280f48c58357ca898",'
           if s.count(old) != 1:
               raise SystemExit("XNNPACK http_archive not found; update this step for the new XNNPACK version")
-          w.write_text(s.replace(old, old + '\n    patches = ["@//third_party:xnnpack_windows_arm64.patch"],\n    patch_args = ["-p1"],'))
+          w.write_text(s.replace(old, old + (
+              '\n    patches = ["@//third_party:xnnpack_windows_arm64_config.patch",'
+              ' "@//third_party:xnnpack_windows_arm64_defs.patch"],'
+              '\n    patch_args = ["-p1"],')))
 
           # MediaPipe's //mediapipe:windows also requires x86_64, so on arm64
           # every Windows select falls through to Linux's branch (OpenCV from
